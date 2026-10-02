@@ -2,6 +2,36 @@
   "$comment": "示范信源：首次启动时导入（scripts/seed.ts），已存在的不会被覆盖。之后在后台“信源”里增删改。字段说明见 docs/customize.md。",
   "sources": [
     {
+      "id": "json-openrich-flash-news",
+      "name": "OpenRich 财经快讯",
+      "kind": "json_list",
+      "config": {
+        "url": "https://news.crabpi.com/api/flash-news?limit=100",
+        "mode": "json_api",
+        "itemsPath": "items",
+        "titlePaths": ["title"],
+        "urlTemplate": "{raw:url}",
+        "summaryPaths": ["content_text"],
+        "summaryIsBody": true,
+        "authorPaths": ["_meta.source", "_meta.author", "authors.0.name"],
+        "publishedAtPath": "date_published",
+        "publishedAtCorrectionMinutes": -480,
+        "externalIdPath": "id",
+        "identityByExternalId": true,
+        "directPublishCategory": "finance",
+        "pollIntervalSeconds": 15,
+        "sortByPublishedAt": true,
+        "_aihot": { "initialBackfillLimit": 300 }
+      },
+      "tier": "T2",
+      "first_party": false,
+      "participation_mode": "editorial",
+      "interval_minutes": 1,
+      "tags": ["财经快讯"],
+      "site_fulltext": false,
+      "syndicate_fulltext": false
+    },
+    {
       "id": "rss-openai-news",
       "name": "OpenAI News",
       "kind": "rss",

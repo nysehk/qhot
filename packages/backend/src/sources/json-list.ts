@@ -2,6 +2,7 @@
 import { credential } from "../config.ts";
 import { guardedFetch } from "../lib/http-fetch.ts";
 import { collapseWhitespace, stripTags } from "../lib/text.ts";
+import { sha256 } from "../lib/ids.ts";
 import { FetchError, type Candidate, type SourceRow } from "./types.ts";
 
 export function getPath(obj: unknown, path: string): unknown {
@@ -37,6 +38,12 @@ export function renderTemplate(template: string, item: unknown): string | null {
     return raw ? String(v) : encodeURIComponent(String(v)).replace(/%2F/g, "/");
   });
   return missing ? null : out;
+}
+
+function correctedDate(v: unknown, unit: string | undefined, correction: number | undefined): Date | null {
+  const date = toDate(v, unit);
+  if (correction !== undefined && (typeof correction !== "number" || !Number.isFinite(correction) || Math.abs(correction) > 1440)) throw new FetchError("invalid publishedAtCorrectionMinutes");
+  return date ? new Date(date.getTime() + (correction ?? 0) * 60000) : null;
 }
 
 function toDate(v: unknown, unit: string | undefined): Date | null {
@@ -136,6 +143,7 @@ function embeddedJson(html: string, source: SourceRow): unknown {
 
 export async function fetchJsonList(source: SourceRow): Promise<Candidate[]> {
   const c = source.config;
+  if (c.identityByExternalId === true && !c.externalIdPath) throw new FetchError("identityByExternalId requires externalIdPath");
   const url = String(c.url ?? "");
   const headers: Record<string, string> = { accept: "application/json, text/html;q=0.9", ...(c.headers ?? {}) };
   if (/^https:\/\/api\.github\.com\//.test(url)) {
@@ -171,6 +179,8 @@ export async function fetchJsonList(source: SourceRow): Promise<Candidate[]> {
     const url = (c.urlTemplate && renderTemplate(c.urlTemplate, item)) || (c.urlTemplateFallback && renderTemplate(c.urlTemplateFallback, item));
     if (!title || !url) continue;
     const externalId = c.externalIdPath ? getPath(item, c.externalIdPath) : null;
+    const stableId = typeof externalId === "string" ? externalId.trim() : typeof externalId === "number" && Number.isFinite(externalId) ? String(externalId) : "";
+    if (c.identityByExternalId === true && !stableId) throw new FetchError("item is missing a valid external ID (identityByExternalId)");
     const summary = firstString(item, c.summaryPaths);
     const raw = item && typeof item === "object" ? { ...(item as Record<string, unknown>) } : { value: item };
     for (const k of c.rawDropKeys ?? []) delete (raw as Record<string, unknown>)[k];
@@ -178,8 +188,9 @@ export async function fetchJsonList(source: SourceRow): Promise<Candidate[]> {
     out.push({
       url,
       title: collapseWhitespace(stripTags(title)),
+      ...(c.identityByExternalId === true ? { identityKey: `json:${source.id}:${sha256(stableId)}` } : {}),
       author: firstString(item, c.authorPaths),
-      publishedAt: toDate(getPath(item, c.publishedAtPath), c.publishedAtUnit),
+      publishedAt: correctedDate(getPath(item, c.publishedAtPath), c.publishedAtUnit, c.publishedAtCorrectionMinutes),
       excerpt: summary ? collapseWhitespace(stripTags(summary)).slice(0, 2000) : null,
       bodyText: summaryIsBody ? stripTags(summary!) : null,
       bodyStatus: summaryIsBody ? "ok" : "pending",

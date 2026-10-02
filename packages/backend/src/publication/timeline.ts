@@ -28,6 +28,11 @@ function filterSql(q: TimelineQuery) {
   return sql`${channelCondition(q.channel)} ${categoryCondition(q.category)} ${tagCondition(q.tag)} ${topicCondition(q.topicTags)}`;
 }
 
+// The finance tab is an unfiltered flash feed even when opened from the selected navigation.
+function timelineCondition(q: TimelineQuery, now: Date) {
+  return q.category === "finance" ? listedCondition(now) : selectedCondition(now);
+}
+
 function binding(q: TimelineQuery): string {
   return queryBinding({ c: q.channel, k: q.category, t: q.tag, p: q.topic ?? null });
 }
@@ -97,7 +102,7 @@ async function queryGroupedAnchors(q: TimelineQuery, now: Date) {
       WITH base AS (
         SELECT p.sort_at, coalesce('s' || p.story_id::text, 'f' || p.fact_id::text, 'a' || p.article_id) AS gk
         FROM publications p
-        WHERE ${selectedCondition(now)} ${filterSql(q)}
+        WHERE ${timelineCondition(q, now)} ${filterSql(q)}
       )
       SELECT gk, max(sort_at) AS anchor_at FROM base GROUP BY gk ORDER BY anchor_at DESC, gk COLLATE "C" DESC`
   ).map((r) => ({ gk: r.gk, anchor: r.anchor_at.getTime() }));
@@ -152,7 +157,7 @@ export async function loadTimeline(q: TimelineQuery): Promise<Omit<TimelineRespo
       ? sql<Member[]>`
         SELECT p.story_id, p.fact_id, p.article_id AS id, p.first_party, p.body_mode, p.score, p.timeline_at, p.sort_at FROM publications p
         WHERE (p.story_id IN ${sql(storyIds.length ? storyIds : [0])} OR (p.story_id IS NULL AND p.fact_id IN ${sql(factIds.length ? factIds : [0])}))
-          AND ${selectedCondition(now)} ${filterSql(q)}`
+          AND ${timelineCondition(q, now)} ${filterSql(q)}`
       : Promise.resolve([] as Member[]),
     groupPool(q, now, storyIds, factIds),
   ]);
@@ -203,7 +208,7 @@ export async function loadTimeline(q: TimelineQuery): Promise<Omit<TimelineRespo
   // Recheck scope when hydrating: a withdrawal may commit after the narrow representative read.
   const rows = new Map(planned.length ? (await sql<ItemRow[]>`
     SELECT ${ITEM_COLUMNS} ${ITEM_FROM} WHERE p.article_id IN ${sql(planned.map((p) => p.id))}
-      AND ${selectedCondition(now)} ${filterSql(q)}`).map((row) => [row.id, row]) : []);
+      AND ${timelineCondition(q, now)} ${filterSql(q)}`).map((row) => [row.id, row]) : []);
   const cards: TimelineCard[] = planned.flatMap(({ id, key, anchorAt, group }) => {
     const row = rows.get(id);
     if (!row) return [];

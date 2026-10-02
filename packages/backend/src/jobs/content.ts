@@ -5,11 +5,13 @@
 // refusal or exhausted retries end in "failed", which the admin re-queues in bulk.
 import type { PgBoss } from "pg-boss";
 import { CAPABILITIES } from "../editorial/models.ts";
+import { isCategoryKey } from "@aihot/contracts/taxonomy";
 import { sql, type Db } from "../db.ts";
 import { extractArticleBody, pageFetchable } from "../content/extract.ts";
 import { analyzeArticle, AnalysisInterruptedError } from "../editorial/analyze.ts";
 import { isHistorical } from "../content/materials.ts";
 import { publishArticle } from "../publication/publish.ts";
+import { publishDirectArticle } from "../editorial/direct.ts";
 import { BudgetExceededError, ProviderRejectedError, ReceiptBusyError, ReceiptUnknownError } from "../providers/receipts.ts";
 import { ModelOutputError } from "../providers/llm.ts";
 import { enqueue, QUEUES, shutdownSignal, work } from "./queue.ts";
@@ -26,6 +28,7 @@ const QUEUED_STALE = "30 minutes";
 type Step = "extract" | "analyze";
 
 interface Route {
+  direct: boolean;
   step: Step;
   /** Not an editorial source: no analysis; the post goes straight to event grouping as discussion evidence. */
   signal: boolean;
@@ -50,7 +53,7 @@ async function route(articleId: string, db: Db): Promise<Route | null> {
   const wantsBody = row.config.fetchPublicContent === true || !!row.config.detail || row.kind === "web_list";
   const needsPage = !signal && (wantsBody || (row.bare && pageFetchable(row.url, row.kind)));
   const needsXArticle = row.kind === "x_search" && (!signal || (row.participation_mode === "hot_signal" && !historical));
-  return { step: pending && (needsPage || needsXArticle) ? "extract" : "analyze", signal, historical };
+  return { direct: !signal && isCategoryKey(row.config.directPublishCategory), step: pending && (needsPage || needsXArticle) ? "extract" : "analyze", signal, historical };
 }
 
 /**
@@ -81,7 +84,7 @@ export async function queueProcessing(articleId: string, opts: { step?: Step; at
     return enqueue(QUEUES.group, { articleId, signalOnly: true }, { singletonKey: articleId, priority: r.historical ? PRIORITY.history : PRIORITY.liveSignal }, opts.db);
   }
   const tagged = !!attemptTag;
-  return enqueue(QUEUES.analyze, tagged ? { articleId, attemptTag } : { articleId },
+  return enqueue(r.direct ? QUEUES.direct : QUEUES.analyze, tagged ? { articleId, attemptTag } : { articleId },
     { singletonKey: tagged ? `manual:analyze:${articleId}:${attemptTag}` : articleId, priority: r.historical ? PRIORITY.history : PRIORITY.live }, opts.db);
 }
 
@@ -137,6 +140,7 @@ async function processRevision(articleId: string, row: NonNullable<Awaited<Retur
     return { state: "skipped" };
   }
   try {
+    if (await publishDirectArticle(articleId)) return { state: "direct-published" };
     const result = await analyzeArticle(articleId, { attemptTag: opts.attemptTag });
     if (!result) return { state: "missing" };
     // Only a title or a feed summary: the article page first; extraction queues the analysis again.
@@ -194,6 +198,12 @@ async function afterFailure(articleId: string, revision: number, error: unknown)
 }
 
 export async function registerContentJobs(boss: PgBoss, concurrency = Number(process.env.ANALYZE_CONCURRENCY || 6)) {
+  await work(boss, QUEUES.direct, { localConcurrency: 4, pollingIntervalSeconds: 1 }, async ({ articleId, attemptTag }) => {
+    const row = await processingInput(articleId);
+    if (!row) return { state: "missing" };
+    try { return await processRevision(articleId, row, { attemptTag }); }
+    catch (error) { return afterFailure(articleId, row.revision, error); }
+  });
   await work(boss, QUEUES.analyze, { localConcurrency: concurrency, pollingIntervalSeconds: 2 }, async ({ articleId, attemptTag }) => {
     const row = await processingInput(articleId);
     if (!row) return { state: "missing" };

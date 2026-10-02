@@ -1,5 +1,5 @@
 import { SITE, withSubject } from "@aihot/industry/site";
-import { Link, useLoaderData, useNavigation, useSearchParams } from "react-router";
+import { data as withHeaders, Link, useLoaderData, useNavigation, useSearchParams } from "react-router";
 import type { Route } from "./+types/all";
 import type { PoolResponse } from "@aihot/contracts/site";
 import { isCategoryKey, isChannelKey } from "@aihot/contracts/taxonomy";
@@ -10,6 +10,7 @@ import { PillTabs } from "../components/ui/Tabs";
 import { DayList, Pagination } from "../features/feed/DayList";
 import { EmptyState } from "../components/ui/Page";
 import { RingMark } from "../components/Logo";
+import { useFinanceRefresh } from "../lib/use-finance-refresh";
 
 export async function loader({ request }: Route.LoaderArgs) {
   const url = new URL(request.url);
@@ -26,7 +27,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     `/api/site/pool${queryString({ channel: channel === "all" ? null : channel, category, tag, q, tab, page: page > 1 ? page : null })}`,
     { signal: request.signal, busyRedirect: "/all/search-busy" },
   );
-  return { data };
+  return withHeaders({ data }, { headers: { "Cache-Control": category === "finance" ? "public, max-age=0, s-maxage=0, must-revalidate" : "public, max-age=0, s-maxage=60, stale-while-revalidate=30" } });
 }
 
 export function meta({ loaderData }: Route.MetaArgs) {
@@ -41,8 +42,8 @@ export function meta({ loaderData }: Route.MetaArgs) {
   });
 }
 
-export function headers() {
-  return { "Cache-Control": "public, max-age=0, s-maxage=60, stale-while-revalidate=30" };
+export function headers({ loaderHeaders }: Route.HeadersArgs) {
+  return loaderHeaders;
 }
 
 function pageHref(params: URLSearchParams, page: number) {
@@ -61,6 +62,7 @@ export default function AllPage() {
   const [params] = useSearchParams();
   const navigation = useNavigation();
   const f = data.filters;
+  useFinanceRefresh(f.category === "finance" && data.page === 1 && !f.q);
   const busy = navigation.state === "loading" && navigation.location?.pathname === "/all";
   const keep = { channel: f.channel === "all" ? null : f.channel, category: f.category };
   const searchTabHref = (tab: "time" | "relevance") => {

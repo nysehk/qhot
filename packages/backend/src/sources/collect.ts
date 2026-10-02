@@ -188,7 +188,9 @@ export async function collectSource(sourceId: string, opts: { force?: boolean } 
     await sql`
       UPDATE sources SET last_fetch_at = now(), last_ok_at = now(), fail_count = 0, last_error = NULL,
         health = 'ok', cursor = ${sql.json(nextCursor as never)}, updated_at = now(),
-        next_fetch_at = now() + make_interval(mins => interval_minutes)
+        next_fetch_at = CASE WHEN config->>'pollIntervalSeconds' IS NOT NULL
+          THEN to_timestamp((floor(extract(epoch FROM now()) / (config->>'pollIntervalSeconds')::int) + 1) * (config->>'pollIntervalSeconds')::int)
+          ELSE now() + make_interval(mins => interval_minutes) END
       WHERE id = ${sourceId}`;
     await sql`UPDATE fetch_runs SET status = 'ok', finished_at = now(), found_count = ${found}, new_count = ${created},
                 detail = ${detail ? sql.json(detail as never) : null} WHERE id = ${run!.id}`;
@@ -330,20 +332,21 @@ async function scheduleXShards(): Promise<number> {
 }
 
 /** Every minute: enqueue due sources (enabled, not WeChat/external), oldest due first; X accounts by shard. */
-export async function scheduleDueSources(limit = Number(process.env.FETCH_SCHEDULE_BATCH || 40)): Promise<{ enqueued: number; shards: number }> {
+export async function scheduleDueSources(limit = Number(process.env.FETCH_SCHEDULE_BATCH || 40), fastOnly = false): Promise<{ enqueued: number; shards: number }> {
   const kinds: string[] = (process.env.COLLECT_KINDS || "rss,web_list,json_list,x_search").split(",");
   // Listings fetched through Jina Reader are paid; development can leave them out.
   const skipJina = process.env.COLLECT_SKIP_JINA === "true";
   const rows = await sql<{ id: string }[]>`
     SELECT id FROM sources
     WHERE enabled AND kind IN ${sql(kinds)} AND (next_fetch_at IS NULL OR next_fetch_at <= now()) AND NOT (${sharded()})
+      ${fastOnly ? sql`AND config->>'pollIntervalSeconds' IS NOT NULL` : sql``}
       ${skipJina ? sql`AND config::text NOT LIKE '%r.jina.ai%'` : sql``}
     ORDER BY next_fetch_at NULLS FIRST LIMIT ${limit}`;
   for (const r of rows) {
     await enqueue(QUEUES.fetchSource, { sourceId: r.id }, { singletonKey: r.id });
     await sql`UPDATE sources SET next_fetch_at = now() + interval '10 minutes' WHERE id = ${r.id}`;
   }
-  const shards = kinds.includes("x_search") ? await scheduleXShards() : 0;
+  const shards = !fastOnly && kinds.includes("x_search") ? await scheduleXShards() : 0;
   return { enqueued: rows.length, shards };
 }
 
@@ -359,6 +362,12 @@ export async function adaptIntervals(): Promise<{ updated: number }> {
   let updated = 0;
   for (const r of rows) {
     const perDay = Number(r.per_day);
+    // Public financial flash feeds have a fixed minute cadence, independent of AI feed volume.
+    if (r.kind === "json_list" && r.config.directPublishCategory === "finance" && !r.paid_listing) {
+      const res = await sql`UPDATE sources SET interval_minutes = 1 WHERE id = ${r.id} AND interval_minutes <> 1`;
+      updated += res.count;
+      continue;
+    }
     // Editorial sites and feeds are looked at hourly at least (they cost nothing);
     // editorial X and listings read through Jina stop at two hours (paid per call, within their budgets);
     // hot signals may wait longer.

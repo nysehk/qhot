@@ -96,7 +96,7 @@ export function registerSite(app: FastifyInstance) {
       unfiltered ? loadHotStrip() : null,
     ]);
     const body = { ...data, hot, generatedAt: new Date().toISOString() };
-    const cc = cacheUntil(reply, 60, data.refreshAt);
+    const cc = cacheUntil(reply, filters.category === "finance" ? 0 : 60, data.refreshAt);
     return sendJsonWithEtag(req, reply, body, { etagPrefix: "tl", cacheControl: cc, etagOf: { ...data, hot } });
   }));
 
@@ -108,7 +108,7 @@ export function registerSite(app: FastifyInstance) {
     const tab = q.tab === "relevance" ? "relevance" : "time";
     const data = await loadPool({ ...filters, q: search, tab, page });
     const { generatedAt: _, ...content } = data;
-    return sendJsonWithEtag(req, reply, data, { etagPrefix: "pool", cacheControl: "public, max-age=60, s-maxage=60", etagOf: content });
+    return sendJsonWithEtag(req, reply, data, { etagPrefix: "pool", cacheControl: filters.category === "finance" ? "public, max-age=0, s-maxage=0, must-revalidate" : "public, max-age=60, s-maxage=60", etagOf: content });
   }));
 
   app.get("/api/site/items/:id", siteHandler(async (req, reply) => {

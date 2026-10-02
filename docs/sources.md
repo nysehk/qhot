@@ -109,7 +109,20 @@
 - 接口本身返回数组时，省略 `itemsPath`。`titlePaths`、`summaryPaths`、`authorPaths` 是候选路径数组，按顺序取第一个非空值，例如 `["title", "name"]`。
 - 已有完整网址时用 `{raw:url}`；只有 slug 时可用 `https://example.com/posts/{slug}`。`{字段路径}` 会编码字段值，`{raw:字段路径}` 原样插入。JSON 列表不会自动把相对网址补成绝对网址，模板应产出完整的 HTTP(S) 地址。
 - 日期建议返回带时区的 ISO 字符串；数字时间戳分别设 `publishedAtUnit: "epoch_s"`（秒）或 `"epoch_ms"`（毫秒），`20261001` 这类日期设 `"yyyymmdd"`。
+- 当不同快讯共用一个原文列表 URL 时，可配置 `externalIdPath` 和 `identityByExternalId: true`，按信源 ID 与外部 ID 判重，原文 URL 保持不变。同一 ID 的内容更新仍走文章修订；不同信源的同名 ID 不冲突。默认仍按 URL 判重；开启后缺失 ID 会明确报错，不会把多条快讯合成一篇。已运行的信源切换身份规则会重新导入，建议只在新建信源时启用。
 - 缺少标题或无法生成链接的条目会跳过。非空数组全部映射失败时，会报 `no items mapped (check title/url paths)`；路径不是数组时，会报 `items path did not resolve to an array`。
+
+#### OpenRich 财经快讯
+
+`json-openrich-flash-news` 读取 OpenRich `apps/studio/legacy_market_views.py` 使用的同一上游：`https://news.crabpi.com/api/flash-news?limit=100`。7880 的 `/api/ashare/news` 是登录后的展示接口，会丢失外部 ID、完整发布时间并裁剪内容，因此不把它当采集入口，也不复制登录凭据或放宽内网抓取限制。
+
+JSON Feed 的 `items` 映射为快讯，`id` 用作信源内身份，`url` 保留原文链接，`content_text` 作为完整快讯内容，`date_published` 保留时区，`_meta.source` 保留原媒体署名。worker 继续通过 `collectSource → upsertMaterial → queueProcessing → publication` 处理；前端仍只读取 qhot API。采集间隔默认 15 分钟，首次最多导入 300 条；后续频率仍受现有自适应调度管理。上游可能忽略 `limit` 参数，按实际返回窗口采集。
+
+执行 `node --env-file=.env scripts/seed.ts` 注册；已存在的信源不会被覆盖。采集开关需开启，并重启 worker 后生效。后台可预览、启停和查看抓取记录。该信源配置 `directPublishCategory: "finance"`：快讯使用原始标题和内容，以 `origin=rule` 记录处理结果，通过统一发布层进入“全部动态 → 财经”和“精选 → 财经”；仅财经筛选时展示这些直接发布的快讯，不标记为模型精选，不进入未筛选的 AI 精选和热点。快讯不调用模型做预筛、评分、摘要或事件归组；其他 AI 信源继续沿用原有流程。全文网页和 RSS 权限继续关闭。
+
+`pollIntervalSeconds: 15` 为该源启用秒级采集，worker 每秒检查到期信源，并按 15 秒时间边界安排下一次正常采集；失败保留退避，关闭采集或暂停信源时不抓取。直接发布任务使用独立的 `content.direct` 队列，不排在模型任务之后。财经首屏在可见、停留列表顶部时每 15 秒刷新，接口与页面不复用一分钟缓存。CrabPI 当前将北京时间误标为 `Z`，该源用 `publishedAtCorrectionMinutes: -480` 修正；其他源没有此项则保持原始时间。财经按修正后的发布时间排序展示。
+
+`directPublishCategory` 可用于明确允许直接发布的订阅源，值须为行业分类 key。只有参与方式为 `editorial` 的信源生效；人工撤回、隔离信源和全文许可仍由统一发布层处理。正文缺失时使用接口摘要或原标题，不抓原文列表页拼凑内容。
 
 ### 本地跑通 HTML/JSON 示例
 
@@ -238,3 +251,5 @@ Content-Type: application/json
 - `sourceId` 不存在时会自动建一个 `external` 信源，默认不进公开页面：到后台把它的参与方式改成 `editorial` 才会出现在站上。
 - 在后台暂停信源后，推送接口返回 409，不再接收新文章；恢复信源后可以继续推送。
 - 条目的 `raw._aihot.backfill` 为 `true` 时按历史回灌处理（不进入“今天”、不推送）。
+
+财经分类在统一公开读取层按展示正文去重（忽略空格、换行等空白），保留时间最新的一条，时间相同按文章 ID 决定。去重发生在分页和计数之前，网站列表、搜索和公开 API 使用同一规则。原始文章和外部 ID 都保留；最新副本撤回或变为不可公开时，旧副本恢复展示。其他分类不按此规则去重。

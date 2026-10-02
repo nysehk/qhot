@@ -14,7 +14,15 @@ export function releasedCondition(now: Date) {
 
 /** Listed on public surfaces now: public, pool eligible, and past the release gate. */
 export function listedCondition(now: Date) {
-  return sql`p.visibility = 'public' AND p.eligible AND ${releasedCondition(now)}`;
+  return sql`p.visibility = 'public' AND p.eligible AND ${releasedCondition(now)}
+    AND (p.category <> 'finance' OR NOT EXISTS (
+      SELECT 1 FROM publications newer
+      WHERE newer.category = 'finance' AND newer.visibility = 'public' AND newer.eligible
+        AND (NOT newer.selected OR newer.visible_after <= ${now})
+        AND newer.timeline_at <= ${now}
+        AND newer.finance_content_key = p.finance_content_key
+        AND (newer.timeline_at, newer.article_id) > (p.timeline_at, p.article_id)
+    ))`;
 }
 
 /** Story reports include older editorial material outside the pool, but never withdrawn or gated content. */

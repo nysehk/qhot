@@ -2,7 +2,7 @@
 import type { PgBoss } from "pg-boss";
 import { FEATURES } from "@aihot/industry/features";
 import { credential } from "@aihot/backend/config";
-import { ensureQueue, recordRun } from "@aihot/backend/jobs/queue";
+import { ensureQueue, recordRun, shutdownSignal } from "@aihot/backend/jobs/queue";
 import { sweepUnprocessed } from "@aihot/backend/jobs/content";
 import { translatePending } from "@aihot/backend/editorial/translate";
 import { adaptIntervals, scheduleDueSources } from "@aihot/backend/sources/collect";
@@ -91,6 +91,19 @@ export const SCHEDULES: Scheduled[] = [
 ];
 
 export async function registerSchedules(boss: PgBoss) {
+  if (collecting && !shutdownSignal.signal.aborted) {
+    // pg-boss cron runs on minute boundaries; explicitly opted-in feeds also get second-level checks.
+    let running = false;
+    const timer = setInterval(async () => {
+      if (running || shutdownSignal.signal.aborted) return;
+      running = true;
+      try { await scheduleDueSources(40, true); }
+      catch (error) { console.error("[sources.fast-schedule]", error); }
+      finally { running = false; }
+    }, 1000);
+    timer.unref();
+    shutdownSignal.signal.addEventListener("abort", () => clearInterval(timer), { once: true });
+  }
   for (const s of SCHEDULES) {
     const queue = `cron.${s.name}`;
     await ensureQueue(queue, { policy: "singleton", retryLimit: 1, expireInSeconds: 3600 });
